@@ -200,7 +200,7 @@ func TestKMSHashConfigurationSelection(t *testing.T) {
 		input := provider.sourceConfig().(*unstructured.Unstructured)
 		require.Len(t, input.Object, 2)
 		require.Contains(t, input.Object, "spec")
-		require.Equal(t, map[string]interface{}{"kmsPluginImage": ""}, input.Object["status"])
+		require.Equal(t, map[string]interface{}{"kmsPluginImage": "quay.io/test/plugin:v1"}, input.Object["status"])
 		require.NoError(t, unstructured.SetNestedField(input.Object, "changed", "spec", "vaultAddress"))
 		require.Equal(t, before, base)
 	})
@@ -213,6 +213,66 @@ func TestKMSProviderMalformedHashFields(t *testing.T) {
 			require.NoError(t, unstructured.SetNestedField(obj.Object, int64(1), path...))
 			_, err := newKMSProviderConfig(configv1.VaultKMSProvider, obj)
 			require.ErrorContains(t, err, strings.Join(path, "."))
+		})
+	}
+}
+
+func TestResolveKMSConfigRequiredPluginFields(t *testing.T) {
+	for _, path := range [][]string{
+		{"spec", "vaultAddress"}, {"spec", "vaultKeyPath"}, {"spec", "authentication", "type"},
+		{"spec", "authentication", "appRole", "secret", "name"}, {"spec", "tls", "caBundle", "name"},
+		{"status", "kmsPluginImage"},
+	} {
+		for _, state := range []string{"missing", "empty", "null", "wrong type"} {
+			t.Run(strings.Join(path, ".")+"/"+state, func(t *testing.T) {
+				obj := vaultPluginConfig(t, wellKnownBaseVaultConfig)
+				// Keep the optional CA reference present when checking its required name.
+				require.NoError(t, unstructured.SetNestedField(obj.Object, "ca", "spec", "tls", "caBundle", "name"))
+				switch state {
+				case "missing":
+					unstructured.RemoveNestedField(obj.Object, path...)
+				case "empty":
+					require.NoError(t, unstructured.SetNestedField(obj.Object, "", path...))
+				case "null":
+					require.NoError(t, unstructured.SetNestedField(obj.Object, nil, path...))
+				case "wrong type":
+					require.NoError(t, unstructured.SetNestedField(obj.Object, int64(1), path...))
+				}
+				config, err := ResolveKMSConfig(context.Background(), newKMSDynamicClient(t, obj), kmsPluginConfigReference())
+				require.Nil(t, config)
+				require.ErrorContains(t, err, strings.Join(path, "."))
+			})
+		}
+	}
+}
+
+func TestResolveKMSConfigOptionalPluginFields(t *testing.T) {
+	for _, serverName := range []string{"", "vault.example.com"} {
+		t.Run("serverName="+serverName, func(t *testing.T) {
+			obj := vaultPluginConfig(t, wellKnownBaseVaultConfig)
+			for _, path := range [][]string{{"spec", "vaultNamespace"}, {"spec", "vaultAuthNamespace"}, {"spec", "tls"}} {
+				unstructured.RemoveNestedField(obj.Object, path...)
+			}
+			if serverName != "" {
+				require.NoError(t, unstructured.SetNestedField(obj.Object, serverName, "spec", "tls", "serverName"))
+			}
+			// Tags remain accepted: this commit only checks that the image is non-empty.
+			require.NoError(t, unstructured.SetNestedField(obj.Object, "quay.io/test/plugin:v1", "status", "kmsPluginImage"))
+			config, err := ResolveKMSConfig(context.Background(), newKMSDynamicClient(t, obj), kmsPluginConfigReference())
+			require.NoError(t, err)
+			require.Equal(t, obj, config)
+		})
+	}
+}
+
+func TestResolveKMSConfigMissingRequiredSections(t *testing.T) {
+	for _, path := range [][]string{{"spec"}, {"spec", "authentication"}, {"spec", "authentication", "appRole"}, {"spec", "authentication", "appRole", "secret"}, {"status"}} {
+		t.Run(strings.Join(path, "."), func(t *testing.T) {
+			obj := vaultPluginConfig(t, wellKnownBaseVaultConfig)
+			unstructured.RemoveNestedField(obj.Object, path...)
+			config, err := ResolveKMSConfig(context.Background(), newKMSDynamicClient(t, obj), kmsPluginConfigReference())
+			require.Nil(t, config)
+			require.Error(t, err)
 		})
 	}
 }
