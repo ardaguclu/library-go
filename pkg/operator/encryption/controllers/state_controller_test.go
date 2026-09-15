@@ -14,6 +14,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/diff"
@@ -21,7 +22,6 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	clientgotesting "k8s.io/client-go/testing"
 
-	configv1 "github.com/openshift/api/config/v1"
 	operatorv1 "github.com/openshift/api/operator/v1"
 	configv1clientfake "github.com/openshift/client-go/config/clientset/versioned/fake"
 	configv1informers "github.com/openshift/client-go/config/informers/externalversions"
@@ -745,7 +745,7 @@ func TestStateController(t *testing.T) {
 						}},
 					}},
 				},
-				KMSPlugins: map[string]configv1.KMSPluginConfig{"1": encryptiontesting.DefaultKMSPluginConfig},
+				KMSPlugins: map[string]*unstructured.Unstructured{"1": encryptiontesting.DefaultKMSPluginConfig},
 			},
 			validateFunc: func(ts *testing.T, actions []clientgotesting.Action, destName string, expectedEncryptionCfg *encryptiondata.Config) {
 				wasSecretValidated := false
@@ -817,7 +817,7 @@ func TestStateController(t *testing.T) {
 						}},
 					}},
 				},
-				KMSPlugins: map[string]configv1.KMSPluginConfig{"1": encryptiontesting.DefaultKMSPluginConfig},
+				KMSPlugins: map[string]*unstructured.Unstructured{"1": encryptiontesting.DefaultKMSPluginConfig},
 			},
 			expectedActions: []string{
 				"list:pods:kms",
@@ -875,7 +875,7 @@ func TestStateController(t *testing.T) {
 								}},
 							}},
 						},
-						KMSPlugins: map[string]configv1.KMSPluginConfig{"1": encryptiontesting.DefaultKMSPluginConfig},
+						KMSPlugins: map[string]*unstructured.Unstructured{"1": encryptiontesting.DefaultKMSPluginConfig},
 					}
 					ecs := createEncryptionCfgSecret(t, "kms", "1", ec)
 					return ecs
@@ -897,7 +897,7 @@ func TestStateController(t *testing.T) {
 								}},
 							}},
 						},
-						KMSPlugins: map[string]configv1.KMSPluginConfig{"1": encryptiontesting.DefaultKMSPluginConfig},
+						KMSPlugins: map[string]*unstructured.Unstructured{"1": encryptiontesting.DefaultKMSPluginConfig},
 					}
 					ecs := createEncryptionCfgSecret(t, "openshift-config-managed", "1", ec)
 					ecs.Name = "encryption-config-kms"
@@ -917,23 +917,28 @@ func TestStateController(t *testing.T) {
 			initialResources: []runtime.Object{
 				encryptiontesting.CreateDummyKubeAPIPod("kube-apiserver-1", "kms", "node-1"),
 				encryptiontesting.CreateExpiredMigratedEncryptionKeySecretWithKMSPluginConfig("kms", []schema.GroupResource{{Group: "", Resource: "secrets"}}, 1),
-				encryptiontesting.CreateEncryptionKeySecretWithCustomKMSPluginConfig("kms", []schema.GroupResource{{Group: "", Resource: "secrets"}}, 2, configv1.KMSPluginConfig{
-					Type: configv1.VaultKMSProvider,
-					Vault: configv1.VaultKMSPluginConfig{
-						KMSPluginImage: "registry.example.com/kms-plugin@sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
-						VaultAddress:   "https://vault2.example.com",
-						Authentication: configv1.VaultAuthentication{
-							Type: configv1.VaultAuthenticationTypeAppRole,
-							AppRole: configv1.VaultAppRoleAuthentication{
-								Secret: configv1.VaultSecretReference{Name: "vault-approle-secret-2"},
+				encryptiontesting.CreateEncryptionKeySecretWithCustomKMSPluginConfig("kms", []schema.GroupResource{{Group: "", Resource: "secrets"}}, 2, &unstructured.Unstructured{Object: map[string]interface{}{
+					"apiVersion": "kms.openshift.io/v1alpha1",
+					"kind":       "VaultKMSConfig",
+					"spec": map[string]interface{}{
+						"vaultAddress": "https://vault2.example.com",
+						"authentication": map[string]interface{}{
+							"type": "AppRole",
+							"appRole": map[string]interface{}{
+								"secret": map[string]interface{}{
+									"name": "vault-approle-secret-2",
+								},
 							},
 						},
-						TLS: configv1.VaultTLSConfig{
-							CABundle: configv1.VaultConfigMapReference{Name: "vault-ca-bundle-2"},
+						"tls": map[string]interface{}{
+							"caBundle": map[string]interface{}{
+								"name": "vault-ca-bundle-2",
+							},
 						},
-						VaultKeyPath: "transit/keys/test-transit-key-2",
+						"vaultKeyPath": "transit/keys/test-transit-key-2",
 					},
-				}),
+					"status": map[string]interface{}{"kmsPluginImage": "registry.example.com/kms-plugin@sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"},
+				}}),
 				func() *corev1.Secret { // encryption config in kms namespace
 					ec := &encryptiondata.Config{Encryption: &apiserverconfigv1.EncryptionConfiguration{
 						Resources: []apiserverconfigv1.ResourceConfiguration{{
@@ -1015,26 +1020,28 @@ func TestStateController(t *testing.T) {
 						}},
 					}},
 				},
-				KMSPlugins: map[string]configv1.KMSPluginConfig{
-					"1": encryptiontesting.DefaultKMSPluginConfig,
-					"2": {
-						Type: configv1.VaultKMSProvider,
-						Vault: configv1.VaultKMSPluginConfig{
-							KMSPluginImage: "registry.example.com/kms-plugin@sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
-							VaultAddress:   "https://vault2.example.com",
-							Authentication: configv1.VaultAuthentication{
-								Type: configv1.VaultAuthenticationTypeAppRole,
-								AppRole: configv1.VaultAppRoleAuthentication{
-									Secret: configv1.VaultSecretReference{Name: "vault-approle-secret-2"},
+				KMSPlugins: map[string]*unstructured.Unstructured{"1": encryptiontesting.DefaultKMSPluginConfig, "2": {Object: map[string]interface{}{
+					"apiVersion": "kms.openshift.io/v1alpha1",
+					"kind":       "VaultKMSConfig",
+					"spec": map[string]interface{}{
+						"vaultAddress": "https://vault2.example.com",
+						"authentication": map[string]interface{}{
+							"type": "AppRole",
+							"appRole": map[string]interface{}{
+								"secret": map[string]interface{}{
+									"name": "vault-approle-secret-2",
 								},
 							},
-							TLS: configv1.VaultTLSConfig{
-								CABundle: configv1.VaultConfigMapReference{Name: "vault-ca-bundle-2"},
-							},
-							VaultKeyPath: "transit/keys/test-transit-key-2",
 						},
+						"tls": map[string]interface{}{
+							"caBundle": map[string]interface{}{
+								"name": "vault-ca-bundle-2",
+							},
+						},
+						"vaultKeyPath": "transit/keys/test-transit-key-2",
 					},
-				},
+					"status": map[string]interface{}{"kmsPluginImage": "registry.example.com/kms-plugin@sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"},
+				}}},
 			},
 			expectedActions: []string{
 				"list:pods:kms",
@@ -1133,23 +1140,28 @@ func TestStateController(t *testing.T) {
 						}},
 					}},
 				},
-				KMSPlugins: map[string]configv1.KMSPluginConfig{"2": {
-					Type: configv1.VaultKMSProvider,
-					Vault: configv1.VaultKMSPluginConfig{
-						KMSPluginImage: "registry.example.com/kms-plugin@sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
-						VaultAddress:   "https://vault.example.com",
-						TLS: configv1.VaultTLSConfig{
-							CABundle: configv1.VaultConfigMapReference{Name: "vault-ca-bundle"},
-						},
-						Authentication: configv1.VaultAuthentication{
-							Type: configv1.VaultAuthenticationTypeAppRole,
-							AppRole: configv1.VaultAppRoleAuthentication{
-								Secret: configv1.VaultSecretReference{Name: "vault-approle-secret"},
+				KMSPlugins: map[string]*unstructured.Unstructured{"2": {Object: map[string]interface{}{
+					"apiVersion": "kms.openshift.io/v1alpha1",
+					"kind":       "VaultKMSConfig",
+					"spec": map[string]interface{}{
+						"vaultAddress": "https://vault.example.com",
+						"tls": map[string]interface{}{
+							"caBundle": map[string]interface{}{
+								"name": "vault-ca-bundle",
 							},
 						},
-						VaultKeyPath: "transit/keys/test-transit-key",
+						"authentication": map[string]interface{}{
+							"type": "AppRole",
+							"appRole": map[string]interface{}{
+								"secret": map[string]interface{}{
+									"name": "vault-approle-secret",
+								},
+							},
+						},
+						"vaultKeyPath": "transit/keys/test-transit-key",
 					},
-				}},
+					"status": map[string]interface{}{"kmsPluginImage": "registry.example.com/kms-plugin@sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"},
+				}}},
 			},
 			expectedActions: []string{
 				"list:pods:kms",

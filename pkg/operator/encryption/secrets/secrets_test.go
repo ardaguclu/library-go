@@ -7,31 +7,36 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	v1 "k8s.io/apiserver/pkg/apis/apiserver/v1"
 	"k8s.io/utils/diff"
 
-	configv1 "github.com/openshift/api/config/v1"
 	"github.com/openshift/library-go/pkg/operator/encryption/state"
 )
 
-var defaultKMSPluginConfig = configv1.KMSPluginConfig{
-	Type: configv1.VaultKMSProvider,
-	Vault: configv1.VaultKMSPluginConfig{
-		KMSPluginImage: "registry.example.com/kms-plugin@sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
-		VaultAddress:   "https://vault.example.com",
-		Authentication: configv1.VaultAuthentication{
-			Type: configv1.VaultAuthenticationTypeAppRole,
-			AppRole: configv1.VaultAppRoleAuthentication{
-				Secret: configv1.VaultSecretReference{Name: "vault-approle-secret"},
+var defaultKMSPluginConfig = &unstructured.Unstructured{Object: map[string]interface{}{
+	"apiVersion": "kms.openshift.io/v1alpha1",
+	"kind":       "VaultKMSConfig",
+	"spec": map[string]interface{}{
+		"vaultAddress": "https://vault.example.com",
+		"authentication": map[string]interface{}{
+			"type": "AppRole",
+			"appRole": map[string]interface{}{
+				"secret": map[string]interface{}{
+					"name": "vault-approle-secret",
+				},
 			},
 		},
-		TLS: configv1.VaultTLSConfig{
-			CABundle: configv1.VaultConfigMapReference{Name: "vault-ca-bundle"},
+		"tls": map[string]interface{}{
+			"caBundle": map[string]interface{}{
+				"name": "vault-ca-bundle",
+			},
 		},
-		VaultKeyPath: "transit/keys/test-transit-key",
+		"vaultKeyPath": "transit/keys/test-transit-key",
 	},
-}
+	"status": map[string]interface{}{"kmsPluginImage": "registry.example.com/kms-plugin@sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"},
+}}
 
 func TestRoundtrip(t *testing.T) {
 	now, _ := time.Parse(time.RFC3339, time.Now().Format(time.RFC3339))

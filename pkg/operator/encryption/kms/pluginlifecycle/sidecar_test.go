@@ -13,6 +13,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	apiserverv1 "k8s.io/apiserver/pkg/apis/apiserver/v1"
 	fake "k8s.io/client-go/kubernetes/fake"
@@ -31,27 +32,32 @@ type sidecarTestFixtures struct {
 func newSidecarTestFixtures(t *testing.T) sidecarTestFixtures {
 	t.Helper()
 
-	vaultConfig := &configv1.KMSPluginConfig{
-		Type: configv1.VaultKMSProvider,
-		Vault: configv1.VaultKMSPluginConfig{
-			KMSPluginImage:     "quay.io/test/vault:v1",
-			VaultAddress:       "https://vault.example.com:8200",
-			VaultNamespace:     "my-namespace",
-			VaultAuthNamespace: "my-auth-namespace",
-			VaultKeyPath:       "transit/keys/my-key",
-			Authentication: configv1.VaultAuthentication{
-				Type: configv1.VaultAuthenticationTypeAppRole,
-				AppRole: configv1.VaultAppRoleAuthentication{
-					Secret: configv1.VaultSecretReference{Name: "vault-approle"},
+	vaultConfig := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "kms.openshift.io/v1alpha1",
+		"kind":       "VaultKMSConfig",
+		"spec": map[string]interface{}{
+			"vaultAddress":       "https://vault.example.com:8200",
+			"vaultNamespace":     "my-namespace",
+			"vaultAuthNamespace": "my-auth-namespace",
+			"vaultKeyPath":       "transit/keys/my-key",
+			"authentication": map[string]interface{}{
+				"type": "AppRole",
+				"appRole": map[string]interface{}{
+					"secret": map[string]interface{}{
+						"name": "vault-approle",
+					},
 				},
 			},
-			TLS: configv1.VaultTLSConfig{
-				CABundle:   configv1.VaultConfigMapReference{Name: "vault-ca-bundle"},
-				ServerName: "vault.internal.example.com",
+			"tls": map[string]interface{}{
+				"caBundle": map[string]interface{}{
+					"name": "vault-ca-bundle",
+				},
+				"serverName": "vault.internal.example.com",
 			},
 		},
-	}
-	pluginConfigBytes, err := encoding.EncodeKMSPluginConfig(*vaultConfig)
+		"status": map[string]interface{}{"kmsPluginImage": "quay.io/test/vault:v1"},
+	}}
+	pluginConfigBytes, err := encoding.EncodeKMSPluginConfig(vaultConfig)
 	require.NoError(t, err)
 
 	encryptionConfig := &apiserverv1.EncryptionConfiguration{
@@ -317,25 +323,30 @@ func TestEnsureKMSPluginSidecarInPodSpec(t *testing.T) {
 				Volumes: []corev1.Volume{f.resourceDirVolume, socketVolume, refDataVolume},
 			},
 			secretClient: func() corev1client.SecretsGetter {
-				vaultConfig2 := &configv1.KMSPluginConfig{
-					Type: configv1.VaultKMSProvider,
-					Vault: configv1.VaultKMSPluginConfig{
-						KMSPluginImage: "quay.io/test/vault:v2",
-						VaultAddress:   "https://vault2.example.com:8200",
-						VaultNamespace: "other-namespace",
-						VaultKeyPath:   "transit2/keys/other-key",
-						Authentication: configv1.VaultAuthentication{
-							Type: configv1.VaultAuthenticationTypeAppRole,
-							AppRole: configv1.VaultAppRoleAuthentication{
-								Secret: configv1.VaultSecretReference{Name: "vault-approle-2"},
+				vaultConfig2 := &unstructured.Unstructured{Object: map[string]interface{}{
+					"apiVersion": "kms.openshift.io/v1alpha1",
+					"kind":       "VaultKMSConfig",
+					"spec": map[string]interface{}{
+						"vaultAddress":   "https://vault2.example.com:8200",
+						"vaultNamespace": "other-namespace",
+						"vaultKeyPath":   "transit2/keys/other-key",
+						"authentication": map[string]interface{}{
+							"type": "AppRole",
+							"appRole": map[string]interface{}{
+								"secret": map[string]interface{}{
+									"name": "vault-approle-2",
+								},
 							},
 						},
-						TLS: configv1.VaultTLSConfig{
-							CABundle: configv1.VaultConfigMapReference{Name: "vault-ca-bundle-2"},
+						"tls": map[string]interface{}{
+							"caBundle": map[string]interface{}{
+								"name": "vault-ca-bundle-2",
+							},
 						},
 					},
-				}
-				pluginConfig2Bytes, err := encoding.EncodeKMSPluginConfig(*vaultConfig2)
+					"status": map[string]interface{}{"kmsPluginImage": "quay.io/test/vault:v2"},
+				}}
+				pluginConfig2Bytes, err := encoding.EncodeKMSPluginConfig(vaultConfig2)
 				require.NoError(t, err)
 
 				pluginConfigKey2 := "kms-plugin-config-777"

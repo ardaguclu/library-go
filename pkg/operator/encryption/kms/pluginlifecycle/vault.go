@@ -3,16 +3,20 @@ package pluginlifecycle
 import (
 	"fmt"
 
-	configv1 "github.com/openshift/api/config/v1"
+	"github.com/openshift/library-go/pkg/operator/encryption/kms"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/utils/ptr"
 )
 
 // newVaultSidecarProvider creates a Vault sidecar provider from the given KMS plugin data.
 // It assumes the input data has been already been validated.
-func newVaultSidecarProvider(name, keyID, udsPath string, vaultConfig configv1.VaultKMSPluginConfig, refData *referenceDataResolver) (*vault, error) {
-	secretName := vaultConfig.Authentication.AppRole.Secret.Name
+func newVaultSidecarProvider(name, keyID, udsPath string, vaultConfig *unstructured.Unstructured, refData *referenceDataResolver) (*vault, error) {
+	secretName, err := kms.PluginConfigSpecString(vaultConfig, "authentication", "appRole", "secret", "name")
+	if err != nil {
+		return nil, err
+	}
 	if secretName == "" {
 		return nil, fmt.Errorf("vault AppRole authentication secret name cannot be empty")
 	}
@@ -36,7 +40,11 @@ func newVaultSidecarProvider(name, keyID, udsPath string, vaultConfig configv1.V
 	}
 
 	var caBundlePath string
-	if configMapName := vaultConfig.TLS.CABundle.Name; configMapName != "" {
+	configMapName, err := kms.PluginConfigSpecString(vaultConfig, "tls", "caBundle", "name")
+	if err != nil {
+		return nil, err
+	}
+	if configMapName != "" {
 		caBundlePath, err = refData.ConfigMapFilePath(configMapName, "ca-bundle.crt")
 		if err != nil {
 			return nil, err
@@ -47,7 +55,7 @@ func newVaultSidecarProvider(name, keyID, udsPath string, vaultConfig configv1.V
 		name:         name,
 		keyID:        keyID,
 		udsPath:      udsPath,
-		config:       vaultConfig,
+		config:       vaultConfig.DeepCopy(),
 		roleID:       roleID,
 		secretIDPath: secretIDPath,
 		caBundlePath: caBundlePath,
@@ -59,7 +67,7 @@ type vault struct {
 	name         string
 	keyID        string
 	udsPath      string
-	config       configv1.VaultKMSPluginConfig
+	config       *unstructured.Unstructured
 	roleID       string
 	secretIDPath string
 	caBundlePath string
@@ -73,11 +81,41 @@ func (v *vault) Name() string {
 // BuildSidecarContainer returns a container spec for the Vault KMS plugin sidecar
 // configured with the Vault address, namespace, transit mount, and transit key.
 func (v *vault) BuildSidecarContainer() (corev1.Container, error) {
+	image, err := kms.PluginConfigStatusString(v.config, "kmsPluginImage")
+	if err != nil {
+		return corev1.Container{}, err
+	}
+
+	address, err := kms.PluginConfigSpecString(v.config, "vaultAddress")
+	if err != nil {
+		return corev1.Container{}, err
+	}
+
+	keyPath, err := kms.PluginConfigSpecString(v.config, "vaultKeyPath")
+	if err != nil {
+		return corev1.Container{}, err
+	}
+
+	namespace, err := kms.PluginConfigSpecString(v.config, "vaultNamespace")
+	if err != nil {
+		return corev1.Container{}, err
+	}
+
+	authNamespace, err := kms.PluginConfigSpecString(v.config, "vaultAuthNamespace")
+	if err != nil {
+		return corev1.Container{}, err
+	}
+
+	serverName, err := kms.PluginConfigSpecString(v.config, "tls", "serverName")
+	if err != nil {
+		return corev1.Container{}, err
+	}
+
 	// Required API fields: always set.
 	args := []string{
 		fmt.Sprintf("-listen-address=%s", v.udsPath),
-		fmt.Sprintf("-vault-address=%s", v.config.VaultAddress),
-		fmt.Sprintf("-vault-key-path=%s", v.config.VaultKeyPath),
+		fmt.Sprintf("-vault-address=%s", address),
+		fmt.Sprintf("-vault-key-path=%s", keyPath),
 		fmt.Sprintf("-approle-role-id=%s", v.roleID),
 		fmt.Sprintf("-approle-secret-id-path=%s", v.secretIDPath),
 	}
@@ -86,14 +124,14 @@ func (v *vault) BuildSidecarContainer() (corev1.Container, error) {
 	if v.caBundlePath != "" {
 		args = append(args, fmt.Sprintf("-tls-ca-file=%s", v.caBundlePath))
 	}
-	if v.config.TLS.ServerName != "" {
-		args = append(args, fmt.Sprintf("-tls-sni=%s", v.config.TLS.ServerName))
+	if serverName != "" {
+		args = append(args, fmt.Sprintf("-tls-sni=%s", serverName))
 	}
-	if v.config.VaultNamespace != "" {
-		args = append(args, fmt.Sprintf("-vault-namespace=%s", v.config.VaultNamespace))
+	if namespace != "" {
+		args = append(args, fmt.Sprintf("-vault-namespace=%s", namespace))
 	}
-	if v.config.VaultAuthNamespace != "" {
-		args = append(args, fmt.Sprintf("-vault-auth-namespace=%s", v.config.VaultAuthNamespace))
+	if authNamespace != "" {
+		args = append(args, fmt.Sprintf("-vault-auth-namespace=%s", authNamespace))
 	}
 
 	// Temporary workarounds. These should go away as we progress with the feature.
@@ -106,7 +144,7 @@ func (v *vault) BuildSidecarContainer() (corev1.Container, error) {
 
 	return corev1.Container{
 		Name:            v.Name(),
-		Image:           v.config.KMSPluginImage,
+		Image:           image,
 		Args:            args,
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		// We place the container in InitContainers with RestartPolicyAlways so the kubelet starts it before

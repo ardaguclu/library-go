@@ -3,12 +3,12 @@ package pluginlifecycle
 import (
 	"testing"
 
-	configv1 "github.com/openshift/api/config/v1"
 	"github.com/openshift/library-go/pkg/operator/encryption/encryptiondata"
 	"github.com/openshift/library-go/pkg/operator/encryption/state"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/utils/ptr"
 )
 
@@ -30,7 +30,7 @@ func newVaultCABundleConfigMapData(t *testing.T, caBundleCrt string) state.KMSRe
 func TestVaultSidecarProvider_BuildSidecarContainer(t *testing.T) {
 	tests := []struct {
 		name               string
-		vaultConfig        configv1.VaultKMSPluginConfig
+		vaultConfig        *unstructured.Unstructured
 		secretData         state.KMSReferenceData
 		configMapData      state.KMSReferenceData
 		referenceDataDir   string
@@ -43,22 +43,30 @@ func TestVaultSidecarProvider_BuildSidecarContainer(t *testing.T) {
 	}{
 		{
 			name: "builds container with correct args",
-			vaultConfig: configv1.VaultKMSPluginConfig{
-				KMSPluginImage:     "quay.io/test/vault:v2",
-				VaultAddress:       "https://vault.example.com:8200",
-				VaultNamespace:     "my-namespace",
-				VaultAuthNamespace: "my-auth-namespace",
-				VaultKeyPath:       "transit/keys/my-key",
-				Authentication: configv1.VaultAuthentication{
-					AppRole: configv1.VaultAppRoleAuthentication{
-						Secret: configv1.VaultSecretReference{Name: "vault-approle"},
+			vaultConfig: &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "kms.openshift.io/v1alpha1",
+				"kind":       "VaultKMSConfig",
+				"spec": map[string]interface{}{
+					"vaultAddress":       "https://vault.example.com:8200",
+					"vaultNamespace":     "my-namespace",
+					"vaultAuthNamespace": "my-auth-namespace",
+					"vaultKeyPath":       "transit/keys/my-key",
+					"authentication": map[string]interface{}{
+						"appRole": map[string]interface{}{
+							"secret": map[string]interface{}{
+								"name": "vault-approle",
+							},
+						},
+					},
+					"tls": map[string]interface{}{
+						"caBundle": map[string]interface{}{
+							"name": "vault-ca-bundle",
+						},
+						"serverName": "vault.internal.example.com",
 					},
 				},
-				TLS: configv1.VaultTLSConfig{
-					CABundle:   configv1.VaultConfigMapReference{Name: "vault-ca-bundle"},
-					ServerName: "vault.internal.example.com",
-				},
-			},
+				"status": map[string]interface{}{"kmsPluginImage": "quay.io/test/vault:v2"},
+			}},
 			secretData:       newVaultAppRoleSecretData(t, "test-role-id", "test-secret-id"),
 			configMapData:    newVaultCABundleConfigMapData(t, "test-ca-cert"),
 			referenceDataDir: "/etc/kubernetes/static-pod-resources/secrets/encryption-config",
@@ -102,20 +110,28 @@ func TestVaultSidecarProvider_BuildSidecarContainer(t *testing.T) {
 		},
 		{
 			name: "appends to existing containers",
-			vaultConfig: configv1.VaultKMSPluginConfig{
-				KMSPluginImage: "quay.io/test/vault:v2",
-				VaultAddress:   "https://vault.example.com:8200",
-				VaultNamespace: "my-namespace",
-				VaultKeyPath:   "transit/keys/my-key",
-				Authentication: configv1.VaultAuthentication{
-					AppRole: configv1.VaultAppRoleAuthentication{
-						Secret: configv1.VaultSecretReference{Name: "vault-approle"},
+			vaultConfig: &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "kms.openshift.io/v1alpha1",
+				"kind":       "VaultKMSConfig",
+				"spec": map[string]interface{}{
+					"vaultAddress":   "https://vault.example.com:8200",
+					"vaultNamespace": "my-namespace",
+					"vaultKeyPath":   "transit/keys/my-key",
+					"authentication": map[string]interface{}{
+						"appRole": map[string]interface{}{
+							"secret": map[string]interface{}{
+								"name": "vault-approle",
+							},
+						},
+					},
+					"tls": map[string]interface{}{
+						"caBundle": map[string]interface{}{
+							"name": "vault-ca-bundle",
+						},
 					},
 				},
-				TLS: configv1.VaultTLSConfig{
-					CABundle: configv1.VaultConfigMapReference{Name: "vault-ca-bundle"},
-				},
-			},
+				"status": map[string]interface{}{"kmsPluginImage": "quay.io/test/vault:v2"},
+			}},
 			secretData:       newVaultAppRoleSecretData(t, "test-role-id", "test-secret-id"),
 			configMapData:    newVaultCABundleConfigMapData(t, "test-ca-cert"),
 			referenceDataDir: "/etc/kubernetes/static-pod-resources/secrets/encryption-config",
@@ -166,17 +182,23 @@ func TestVaultSidecarProvider_BuildSidecarContainer(t *testing.T) {
 		},
 		{
 			name: "empty optional fields",
-			vaultConfig: configv1.VaultKMSPluginConfig{
-				KMSPluginImage: "quay.io/test/vault:v2",
-				VaultAddress:   "https://vault.example.com:8200",
-				VaultKeyPath:   "transit/keys/my-key",
-				VaultNamespace: "",
-				Authentication: configv1.VaultAuthentication{
-					AppRole: configv1.VaultAppRoleAuthentication{
-						Secret: configv1.VaultSecretReference{Name: "vault-approle"},
+			vaultConfig: &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "kms.openshift.io/v1alpha1",
+				"kind":       "VaultKMSConfig",
+				"spec": map[string]interface{}{
+					"vaultAddress":   "https://vault.example.com:8200",
+					"vaultKeyPath":   "transit/keys/my-key",
+					"vaultNamespace": "",
+					"authentication": map[string]interface{}{
+						"appRole": map[string]interface{}{
+							"secret": map[string]interface{}{
+								"name": "vault-approle",
+							},
+						},
 					},
 				},
-			},
+				"status": map[string]interface{}{"kmsPluginImage": "quay.io/test/vault:v2"},
+			}},
 			secretData:       newVaultAppRoleSecretData(t, "test-role-id-999", "test-secret-id-999"),
 			referenceDataDir: "/var/run/secrets/kms-plugin",
 			containerName:    "kms-plugin",
@@ -215,13 +237,20 @@ func TestVaultSidecarProvider_BuildSidecarContainer(t *testing.T) {
 		},
 		{
 			name: "empty secret name",
-			vaultConfig: configv1.VaultKMSPluginConfig{
-				Authentication: configv1.VaultAuthentication{
-					AppRole: configv1.VaultAppRoleAuthentication{
-						Secret: configv1.VaultSecretReference{Name: ""},
+			vaultConfig: &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "kms.openshift.io/v1alpha1",
+				"kind":       "VaultKMSConfig",
+				"spec": map[string]interface{}{
+					"authentication": map[string]interface{}{
+						"appRole": map[string]interface{}{
+							"secret": map[string]interface{}{
+								"name": "",
+							},
+						},
 					},
 				},
-			},
+				"status": map[string]interface{}{},
+			}},
 			containerName: "kms-plugin",
 			keyID:         "555",
 			udsPath:       "unix:///var/run/kmsplugin/kms-555.sock",

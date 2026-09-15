@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	configv1 "github.com/openshift/api/config/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	apiserverconfigv1 "k8s.io/apiserver/pkg/apis/apiserver/v1"
 )
@@ -58,7 +58,7 @@ func (k *KeyState) HasKMSEncryption() bool {
 }
 
 func (k *KeyState) HasKMSPlugin() bool {
-	return k != nil && k.KMS != nil && k.KMS.Plugin != (configv1.KMSPluginConfig{})
+	return k != nil && k.KMS != nil && k.KMS.Plugin != nil && len(k.KMS.Plugin.Object) > 0
 }
 
 func (k *KeyState) HasKMSSecretData() bool {
@@ -109,7 +109,7 @@ type KMSState struct {
 	Encryption *apiserverconfigv1.KMSConfiguration
 
 	// Plugin stores KMS plugin specific configurations
-	Plugin configv1.KMSPluginConfig
+	Plugin *unstructured.Unstructured
 
 	// PluginSecretData stores data key-value pairs fetched from referenced secrets.
 	PluginSecretData KMSReferenceData

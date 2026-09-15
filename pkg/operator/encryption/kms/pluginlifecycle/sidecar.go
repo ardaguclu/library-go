@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"strings"
 
-	configv1 "github.com/openshift/api/config/v1"
 	"github.com/openshift/api/features"
 	"github.com/openshift/library-go/pkg/operator/configobserver/featuregates"
 	"github.com/openshift/library-go/pkg/operator/encryption/kms/health"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/utils/ptr"
 )
@@ -42,10 +42,13 @@ type sidecarProvider interface {
 
 // newSidecarProvider creates a provider-specific sidecarProvider for the given keyID and plugin configuration,
 // wiring in reference data (secrets, configmaps) via the referenceDataResolver.
-func newSidecarProvider(keyID string, udsPath string, pluginConfig configv1.KMSPluginConfig, refData *referenceDataResolver) (sidecarProvider, error) {
-	switch pluginConfig.Type {
-	case configv1.VaultKMSProvider:
-		return newVaultSidecarProvider(vaultSidecarPrefix, keyID, udsPath, pluginConfig.Vault, refData)
+func newSidecarProvider(keyID string, udsPath string, pluginConfig *unstructured.Unstructured, refData *referenceDataResolver) (sidecarProvider, error) {
+	if pluginConfig == nil {
+		return nil, fmt.Errorf("KMS plugin config cannot be nil")
+	}
+	switch pluginConfig.GetKind() {
+	case "VaultKMSConfig":
+		return newVaultSidecarProvider(vaultSidecarPrefix, keyID, udsPath, pluginConfig, refData)
 	default:
 		return nil, fmt.Errorf("unsupported KMS plugin configuration")
 	}

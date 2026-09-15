@@ -7,10 +7,10 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	configv1 "github.com/openshift/api/config/v1"
 	"github.com/openshift/library-go/pkg/operator/encryption/encryptiondata"
 	encryptiontesting "github.com/openshift/library-go/pkg/operator/encryption/testing"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -748,13 +748,15 @@ func TestFromEncryptionStateKMSPluginConfigValidation(t *testing.T) {
 						Mode: state.KMS,
 						KMS: &state.KMSState{
 							Encryption: &apiserverconfigv1.KMSConfiguration{APIVersion: "v2", Name: "1", Endpoint: "unix:///var/run/kmsplugin/kms-1.sock"},
-							Plugin: configv1.KMSPluginConfig{
-								Type: configv1.VaultKMSProvider,
-								Vault: configv1.VaultKMSPluginConfig{
-									VaultAddress: "https://vault-a.example.com",
-									VaultKeyPath: "transit/keys/key-a",
+							Plugin: &unstructured.Unstructured{Object: map[string]interface{}{
+								"apiVersion": "kms.openshift.io/v1alpha1",
+								"kind":       "VaultKMSConfig",
+								"spec": map[string]interface{}{
+									"vaultAddress": "https://vault-a.example.com",
+									"vaultKeyPath": "transit/keys/key-a",
 								},
-							},
+								"status": map[string]interface{}{},
+							}},
 						},
 					}},
 				},
@@ -764,13 +766,15 @@ func TestFromEncryptionStateKMSPluginConfigValidation(t *testing.T) {
 						Mode: state.KMS,
 						KMS: &state.KMSState{
 							Encryption: &apiserverconfigv1.KMSConfiguration{APIVersion: "v2", Name: "1", Endpoint: "unix:///var/run/kmsplugin/kms-1.sock"},
-							Plugin: configv1.KMSPluginConfig{
-								Type: configv1.VaultKMSProvider,
-								Vault: configv1.VaultKMSPluginConfig{
-									VaultAddress: "https://vault-b.example.com",
-									VaultKeyPath: "transit/keys/key-b",
+							Plugin: &unstructured.Unstructured{Object: map[string]interface{}{
+								"apiVersion": "kms.openshift.io/v1alpha1",
+								"kind":       "VaultKMSConfig",
+								"spec": map[string]interface{}{
+									"vaultAddress": "https://vault-b.example.com",
+									"vaultKeyPath": "transit/keys/key-b",
 								},
-							},
+								"status": map[string]interface{}{},
+							}},
 						},
 					}},
 				},
@@ -972,9 +976,7 @@ func TestSecretRoundtrip(t *testing.T) {
 						}},
 					}},
 				},
-				KMSPlugins: map[string]configv1.KMSPluginConfig{
-					"1": encryptiontesting.DefaultKMSPluginConfig,
-				},
+				KMSPlugins: map[string]*unstructured.Unstructured{"1": encryptiontesting.DefaultKMSPluginConfig},
 			},
 		},
 		{
@@ -999,9 +1001,7 @@ func TestSecretRoundtrip(t *testing.T) {
 						}},
 					}},
 				},
-				KMSPlugins: map[string]configv1.KMSPluginConfig{
-					"1": encryptiontesting.DefaultKMSPluginConfig,
-				},
+				KMSPlugins: map[string]*unstructured.Unstructured{"1": encryptiontesting.DefaultKMSPluginConfig},
 				KMSPluginsSecretData: func() encryptiondata.KMSPluginsReferenceData {
 					var sd encryptiondata.KMSPluginsReferenceData
 					sd.SetFromRawKey("1", "vault-approle-secret_role-id", []byte("test-role-id"))
@@ -1039,10 +1039,7 @@ func TestSecretRoundtrip(t *testing.T) {
 						}},
 					}},
 				},
-				KMSPlugins: map[string]configv1.KMSPluginConfig{
-					"1": encryptiontesting.DefaultKMSPluginConfig,
-					"2": encryptiontesting.DefaultKMSPluginConfig,
-				},
+				KMSPlugins: map[string]*unstructured.Unstructured{"1": encryptiontesting.DefaultKMSPluginConfig, "2": encryptiontesting.DefaultKMSPluginConfig},
 				KMSPluginsSecretData: func() encryptiondata.KMSPluginsReferenceData {
 					var sd encryptiondata.KMSPluginsReferenceData
 					sd.SetFromRawKey("1", "vault-approle-secret_role-id", []byte("role-id-1"))
@@ -1082,10 +1079,7 @@ func TestSecretRoundtrip(t *testing.T) {
 						}},
 					}},
 				},
-				KMSPlugins: map[string]configv1.KMSPluginConfig{
-					"1": encryptiontesting.DefaultKMSPluginConfig,
-					"2": encryptiontesting.DefaultKMSPluginConfig,
-				},
+				KMSPlugins: map[string]*unstructured.Unstructured{"1": encryptiontesting.DefaultKMSPluginConfig, "2": encryptiontesting.DefaultKMSPluginConfig},
 			},
 		},
 	}
@@ -1120,9 +1114,7 @@ func TestToSecretSecretDataEdgeCases(t *testing.T) {
 				},
 			}},
 		},
-		KMSPlugins: map[string]configv1.KMSPluginConfig{
-			"1": encryptiontesting.DefaultKMSPluginConfig,
-		},
+		KMSPlugins: map[string]*unstructured.Unstructured{"1": encryptiontesting.DefaultKMSPluginConfig},
 	}
 
 	tests := []struct {
@@ -1208,9 +1200,7 @@ func TestFromSecretSecretData(t *testing.T) {
 				},
 			}},
 		},
-		KMSPlugins: map[string]configv1.KMSPluginConfig{
-			"1": encryptiontesting.DefaultKMSPluginConfig,
-		},
+		KMSPlugins: map[string]*unstructured.Unstructured{"1": encryptiontesting.DefaultKMSPluginConfig},
 	}
 
 	baseSecret, err := encryptiondata.ToSecret("openshift-config-managed", "encryption-config-test", baseCfg)
