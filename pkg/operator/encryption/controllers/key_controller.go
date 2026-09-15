@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	apiserverv1 "k8s.io/apiserver/pkg/apis/apiserver/v1"
+	"k8s.io/client-go/dynamic"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/klog/v2"
 
@@ -68,6 +69,7 @@ const (
 type keyController struct {
 	operatorClient  operatorv1helpers.OperatorClient
 	apiServerClient configv1client.APIServerInterface
+	dynamicClient   dynamic.Interface
 
 	controllerInstanceName   string
 	instanceName             string
@@ -97,6 +99,7 @@ func NewKeyController(
 	kubeInformersForNamespaces operatorv1helpers.KubeInformersForNamespaces,
 	secretClient corev1client.SecretsGetter,
 	configMapClient corev1client.ConfigMapsGetter,
+	dynamicClient dynamic.Interface,
 	encryptionSecretSelector metav1.ListOptions,
 	eventRecorder events.Recorder,
 	// encryptionStatusProvider is required for KMS operators; it gates key creation on a preflight check.
@@ -105,6 +108,7 @@ func NewKeyController(
 	c := &keyController{
 		operatorClient:  operatorClient,
 		apiServerClient: apiServerClient,
+		dynamicClient:   dynamicClient,
 
 		instanceName:            instanceName,
 		controllerInstanceName:  factory.ControllerInstanceName(instanceName, "EncryptionKey"),
@@ -183,7 +187,7 @@ func (c *keyController) sync(ctx context.Context, syncCtx factory.SyncContext) (
 }
 
 func (c *keyController) checkAndCreateKeys(ctx context.Context, syncContext factory.SyncContext, encryptedGRs []schema.GroupResource) error {
-	planner := NewEncryptionPlanner(c.instanceName, c.unsupportedConfigPrefix, c.deployer, c.secretClient, c.configMapClient, c.apiServerClient, c.operatorClient, c.encryptionSecretSelector)
+	planner := NewEncryptionPlanner(c.instanceName, c.unsupportedConfigPrefix, c.deployer, c.secretClient, c.configMapClient, c.apiServerClient, c.operatorClient, c.dynamicClient, c.encryptionSecretSelector)
 	snap, err := planner.Load(ctx, encryptedGRs, LoadOptions{})
 	if err != nil {
 		return err
@@ -201,7 +205,7 @@ func (c *keyController) checkAndCreateKeys(ctx context.Context, syncContext fact
 		return nil
 	}
 
-	keySecret, preconditionMet, err := c.generateKeySecret(ctx, plan.KeyID, snap.CurrentMode, snap.APIEncryption, snap.desiredProviderCfg, plan.InternalReason, snap.ExternalReason)
+	keySecret, preconditionMet, err := c.generateKeySecret(ctx, plan.KeyID, snap.CurrentMode, snap.PluginConfig, snap.desiredProviderCfg, plan.InternalReason, snap.ExternalReason)
 	if err != nil {
 		return fmt.Errorf("failed to create key: %v", err)
 	}
@@ -252,8 +256,8 @@ func (c *keyController) validateExistingSecret(ctx context.Context, keySecret *c
 //   - (secret, true,  nil) — preflight passed; caller should persist the key.
 //   - (nil,   false, nil) — preflight still in progress; caller should back off.
 //   - (nil,   false, err) — preflight failed or transient error; caller should surface it.
-func (c *keyController) generateKeySecret(ctx context.Context, keyID uint64, currentMode state.Mode, apiServerEncryption configv1.APIServerEncryption, desiredProviderCfg kmsProviderConfig, internalReason, externalReason string) (*corev1.Secret, bool, error) {
-	ks, refSecret, refCM, err := buildEncryptionKeyState(ctx, keyID, currentMode, apiServerEncryption, desiredProviderCfg, c.secretClient, c.configMapClient, internalReason, externalReason)
+func (c *keyController) generateKeySecret(ctx context.Context, keyID uint64, currentMode state.Mode, pluginConfig *unstructured.Unstructured, desiredProviderCfg kmsProviderConfig, internalReason, externalReason string) (*corev1.Secret, bool, error) {
+	ks, refSecret, refCM, err := buildEncryptionKeyState(ctx, keyID, currentMode, pluginConfig, desiredProviderCfg, c.secretClient, c.configMapClient, internalReason, externalReason)
 	if err != nil {
 		return nil, false, err
 	}
@@ -282,7 +286,7 @@ func (c *keyController) generateKeySecret(ctx context.Context, keyID uint64, cur
 	return secret, true, nil
 }
 
-func buildEncryptionKeyState(ctx context.Context, keyID uint64, currentMode state.Mode, apiServerEncryption configv1.APIServerEncryption, desiredProviderCfg kmsProviderConfig, secretClient corev1client.SecretsGetter, configMapClient corev1client.ConfigMapsGetter, internalReason string, externalReason string) (state.KeyState, *corev1.Secret, *corev1.ConfigMap, error) {
+func buildEncryptionKeyState(ctx context.Context, keyID uint64, currentMode state.Mode, pluginConfig *unstructured.Unstructured, desiredProviderCfg kmsProviderConfig, secretClient corev1client.SecretsGetter, configMapClient corev1client.ConfigMapsGetter, internalReason string, externalReason string) (state.KeyState, *corev1.Secret, *corev1.ConfigMap, error) {
 	bs := crypto.ModeToNewKeyFunc[currentMode]()
 	ks := state.KeyState{
 		Key: apiserverv1.Key{
@@ -298,6 +302,10 @@ func buildEncryptionKeyState(ctx context.Context, keyID uint64, currentMode stat
 		return ks, nil, nil, nil
 	}
 
+	if pluginConfig == nil || len(pluginConfig.Object) == 0 {
+		return state.KeyState{}, nil, nil, fmt.Errorf("KMS plugin configuration must not be nil or empty")
+	}
+
 	ks.KMS = &state.KMSState{
 		Encryption: &apiserverv1.KMSConfiguration{
 			APIVersion: "v2",
@@ -305,7 +313,7 @@ func buildEncryptionKeyState(ctx context.Context, keyID uint64, currentMode stat
 			Endpoint:   fmt.Sprintf(kmsEndpointFormat, keyID),
 			Timeout:    &metav1.Duration{Duration: defaultKMSTimeout},
 		},
-		Plugin: apiServerEncryption.KMS,
+		Plugin: pluginConfig.DeepCopy(),
 	}
 
 	refSecret, refCM, err := fetchReferencedResources(ctx, desiredProviderCfg, secretClient, configMapClient, openshiftConfigNS)
@@ -613,7 +621,7 @@ func needsNewKey(grKeys state.GroupResourceState, currentMode state.Mode, extern
 // kmsProviderConfig abstracts provider-specific KMS logic so that every
 // provider-type switch lives in a single factory (newKMSProviderConfig).
 type kmsProviderConfig interface {
-	// sourceConfig returns the provider-specific API configuration.
+	// sourceConfig returns only the plugin configuration fields used for hashing.
 	sourceConfig() interface{}
 	// referencedSecretName returns the name of the secret referenced by the KMS plugin
 	// config and the specific data keys to carry from that secret. Only the listed keys
@@ -626,7 +634,7 @@ type kmsProviderConfig interface {
 	// sameProviderInstance reports whether latest (stored in the key secret)
 	// and this provider config refer to the same KMS provider instance.
 	// Returns false when migration-triggering fields differ (e.g. VaultAddress, VaultKeyPath).
-	sameProviderInstance(stored configv1.KMSPluginConfig) (bool, error)
+	sameProviderInstance(stored *unstructured.Unstructured) (bool, error)
 }
 
 // noopKMSProviderConfig is a safe zero-value implementation used for non-KMS modes.
@@ -639,62 +647,95 @@ func (noopKMSProviderConfig) referencedSecretName() (string, []string, error) {
 func (noopKMSProviderConfig) referencedConfigMapName() (string, []string, error) {
 	return "", nil, fmt.Errorf("referencedConfigMapName called on non-KMS provider")
 }
-func (noopKMSProviderConfig) sameProviderInstance(configv1.KMSPluginConfig) (bool, error) {
+func (noopKMSProviderConfig) sameProviderInstance(*unstructured.Unstructured) (bool, error) {
 	return false, fmt.Errorf("sameProviderInstance called on non-KMS provider")
 }
 func (noopKMSProviderConfig) sourceConfig() interface{} { return nil }
 
-func newKMSProviderConfig(plugin configv1.KMSPluginConfig) (kmsProviderConfig, error) {
-	switch plugin.Type {
+func newKMSProviderConfig(providerType configv1.KMSProviderType, plugin *unstructured.Unstructured) (kmsProviderConfig, error) {
+	if plugin == nil || len(plugin.Object) == 0 {
+		return nil, fmt.Errorf("KMS plugin configuration must not be nil or empty")
+	}
+	switch providerType {
 	case configv1.VaultKMSProvider:
-		return &vaultProviderConfig{plugin.Vault}, nil
+		spec, _, err := unstructured.NestedMap(plugin.Object, "spec")
+		if err != nil {
+			return nil, fmt.Errorf("failed to read KMS plugin configuration spec: %w", err)
+		}
+		image, err := kms.PluginConfigStatusString(plugin, "kmsPluginImage")
+		if err != nil {
+			return nil, err
+		}
+		hashConfig := &unstructured.Unstructured{Object: map[string]interface{}{
+			"spec":   spec,
+			"status": map[string]interface{}{"kmsPluginImage": image},
+		}}
+		return &vaultProviderConfig{plugin: plugin, hashConfig: hashConfig}, nil
 	default:
-		return nil, fmt.Errorf("unsupported KMS provider type %q", plugin.Type)
+		return nil, fmt.Errorf("unsupported KMS provider type %q", providerType)
 	}
 }
 
 type vaultProviderConfig struct {
-	vault configv1.VaultKMSPluginConfig
+	plugin     *unstructured.Unstructured
+	hashConfig *unstructured.Unstructured
 }
 
 func (v *vaultProviderConfig) sourceConfig() interface{} {
-	return v.vault
+	return v.hashConfig
 }
 
 func (v *vaultProviderConfig) referencedSecretName() (string, []string, error) {
-	switch v.vault.Authentication.Type {
-	case configv1.VaultAuthenticationTypeAppRole:
+	authType, err := kms.PluginConfigSpecString(v.plugin, "authentication", "type")
+	if err != nil {
+		return "", nil, err
+	}
+	switch authType {
+	case string(configv1.VaultAuthenticationTypeAppRole):
+		name, err := kms.PluginConfigSpecString(v.plugin, "authentication", "appRole", "secret", "name")
+		if err != nil {
+			return "", nil, err
+		}
 		// The Vault AppRole secret must contain "role-id" and "secret-id" keys.
 		// These are the only keys carried into the encryption key secret.
-		return v.vault.Authentication.AppRole.Secret.Name, []string{"role-id", "secret-id"}, nil
+		return name, []string{"role-id", "secret-id"}, nil
 	default:
-		return "", nil, fmt.Errorf("unsupported Vault authentication type %q", v.vault.Authentication.Type)
+		return "", nil, fmt.Errorf("unsupported Vault authentication type %q", authType)
 	}
 }
 
 func (v *vaultProviderConfig) referencedConfigMapName() (string, []string, error) {
-	if v.vault.TLS.CABundle.Name == "" {
+	name, err := kms.PluginConfigSpecString(v.plugin, "tls", "caBundle", "name")
+	if err != nil {
+		return "", nil, err
+	}
+	if name == "" {
 		return "", nil, nil
 	}
-	return v.vault.TLS.CABundle.Name, []string{"ca-bundle.crt"}, nil
+	return name, []string{"ca-bundle.crt"}, nil
 }
 
-func (v *vaultProviderConfig) sameProviderInstance(stored configv1.KMSPluginConfig) (bool, error) {
-	if stored.Type != configv1.VaultKMSProvider {
-		klog.V(2).Infof("KMS provider instance changed: provider type changed from %q to %q", stored.Type, configv1.VaultKMSProvider)
+func (v *vaultProviderConfig) sameProviderInstance(stored *unstructured.Unstructured) (bool, error) {
+	if v.plugin == nil || len(v.plugin.Object) == 0 {
+		return false, fmt.Errorf("KMS plugin configuration must not be nil or empty")
+	}
+	if stored == nil || stored.GetKind() != "VaultKMSConfig" {
+		klog.V(2).Info("KMS provider instance changed: stored plugin is not Vault")
 		return false, nil
 	}
-	if v.vault.VaultAddress != stored.Vault.VaultAddress {
-		klog.V(2).Infof("KMS provider instance changed: VaultAddress changed from %q to %q", stored.Vault.VaultAddress, v.vault.VaultAddress)
-		return false, nil
-	}
-	if v.vault.VaultNamespace != stored.Vault.VaultNamespace {
-		klog.V(2).Infof("KMS provider instance changed: VaultNamespace changed from %q to %q", stored.Vault.VaultNamespace, v.vault.VaultNamespace)
-		return false, nil
-	}
-	if v.vault.VaultKeyPath != stored.Vault.VaultKeyPath {
-		klog.V(2).Infof("KMS provider instance changed: VaultKeyPath changed from %q to %q", stored.Vault.VaultKeyPath, v.vault.VaultKeyPath)
-		return false, nil
+	for _, field := range []string{"vaultAddress", "vaultNamespace", "vaultKeyPath"} {
+		current, err := kms.PluginConfigSpecString(v.plugin, field)
+		if err != nil {
+			return false, err
+		}
+		previous, err := kms.PluginConfigSpecString(stored, field)
+		if err != nil {
+			return false, err
+		}
+		if current != previous {
+			klog.V(2).Infof("KMS provider instance changed: %s changed from %q to %q", field, previous, current)
+			return false, nil
+		}
 	}
 	return true, nil
 }

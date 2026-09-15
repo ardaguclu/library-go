@@ -9,12 +9,14 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/wait"
 	apiserverconfigv1 "k8s.io/apiserver/pkg/apis/apiserver/v1"
 
 	configv1 "github.com/openshift/api/config/v1"
 	"github.com/openshift/library-go/pkg/operator/encryption/controllers"
 	"github.com/openshift/library-go/pkg/operator/encryption/encryptiondata"
+	"github.com/openshift/library-go/pkg/operator/encryption/kms"
 	"github.com/openshift/library-go/pkg/operator/encryption/kms/preflight"
 )
 
@@ -150,9 +152,14 @@ func OperatorImageFromDeployment(ctx context.Context, t testing.TB, namespace, d
 func VaultPreflightEncryptionConfigSecret(ctx context.Context, t testing.TB, clientSet ClientSet, namespace string, plugin configv1.KMSPluginConfig) *corev1.Secret {
 	t.Helper()
 	require.Equal(t, configv1.VaultKMSProvider, plugin.Type, "preflight deploy e2e currently supports Vault only")
-	require.Equal(t, configv1.VaultAuthenticationTypeAppRole, plugin.Vault.Authentication.Type)
+	resolved, err := controllers.ResolveKMSConfig(ctx, clientSet.DynamicClient, plugin)
+	require.NoError(t, err)
+	authType, err := kms.PluginConfigSpecString(resolved, "authentication", "type")
+	require.NoError(t, err)
+	require.Equal(t, string(configv1.VaultAuthenticationTypeAppRole), authType)
 
-	secretName := plugin.Vault.Authentication.AppRole.Secret.Name
+	secretName, err := kms.PluginConfigSpecString(resolved, "authentication", "appRole", "secret", "name")
+	require.NoError(t, err)
 	require.NotEmpty(t, secretName, "Vault AppRole secret name")
 	refSecret, err := clientSet.Kube.CoreV1().Secrets(openshiftConfigNS).Get(ctx, secretName, metav1.GetOptions{})
 	require.NoError(t, err, "referenced AppRole secret %s/%s", openshiftConfigNS, secretName)
@@ -165,7 +172,9 @@ func VaultPreflightEncryptionConfigSecret(ctx context.Context, t testing.TB, cli
 	}
 
 	var configMapData encryptiondata.KMSPluginsReferenceData
-	if cmName := plugin.Vault.TLS.CABundle.Name; cmName != "" {
+	cmName, err := kms.PluginConfigSpecString(resolved, "tls", "caBundle", "name")
+	require.NoError(t, err)
+	if cmName != "" {
 		refCM, err := clientSet.Kube.CoreV1().ConfigMaps(openshiftConfigNS).Get(ctx, cmName, metav1.GetOptions{})
 		require.NoError(t, err, "referenced CA ConfigMap %s/%s", openshiftConfigNS, cmName)
 		v, ok := refCM.Data["ca-bundle.crt"]
@@ -189,8 +198,8 @@ func VaultPreflightEncryptionConfigSecret(ctx context.Context, t testing.TB, cli
 				},
 			}},
 		},
-		KMSPlugins: map[string]configv1.KMSPluginConfig{
-			"1": plugin,
+		KMSPlugins: map[string]*unstructured.Unstructured{
+			"1": resolved,
 		},
 		KMSPluginsSecretData:    secretData,
 		KMSPluginsConfigMapData: configMapData,

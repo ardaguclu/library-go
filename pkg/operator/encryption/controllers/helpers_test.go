@@ -8,8 +8,11 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	apiserverconfigv1 "k8s.io/apiserver/pkg/apis/apiserver/v1"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/tools/cache"
 
 	corev1 "k8s.io/api/core/v1"
@@ -75,10 +78,7 @@ func newKMSVaultAPIServer() *configv1.APIServer {
 		Spec: configv1.APIServerSpec{
 			Encryption: configv1.APIServerEncryption{
 				Type: configv1.EncryptionTypeKMS,
-				KMS: configv1.KMSPluginConfig{
-					Type:  configv1.VaultKMSProvider,
-					Vault: wellKnownBaseVaultConfig,
-				},
+				KMS:  kmsPluginConfigReference(),
 			},
 		},
 	}
@@ -89,8 +89,10 @@ func newKMSVaultAPIServer() *configv1.APIServer {
 func newExistingKMSKeySecret(t *testing.T, instanceName string, apiServer *configv1.APIServer, encryptedGRs []schema.GroupResource, keyID string) *corev1.Secret {
 	t.Helper()
 
-	oldPlugin := apiServer.Spec.Encryption.KMS
-	oldPlugin.Vault.VaultKeyPath = "transit/keys/old-key"
+	oldPlugin := vaultPluginConfig(t, wellKnownBaseVaultConfig)
+	if err := unstructured.SetNestedField(oldPlugin.Object, "transit/keys/old-key", "spec", "vaultKeyPath"); err != nil {
+		t.Fatal(err)
+	}
 	ks := state.KeyState{
 		Key:  apiserverconfigv1.Key{Name: keyID, Secret: base64.StdEncoding.EncodeToString(make([]byte, 16))},
 		Mode: state.KMS,
@@ -143,4 +145,36 @@ func newDeployedKMSEncryptionConfig(t *testing.T, instanceName string, encrypted
 		t.Fatalf("failed to serialize deployed encryption config: %v", err)
 	}
 	return secret
+}
+
+func kmsPluginConfigReference() configv1.KMSPluginConfig {
+	return configv1.KMSPluginConfig{
+		Type:         configv1.VaultKMSProvider,
+		PluginConfig: configv1.KMSPluginConfigReference{APIVersion: "kms.openshift.io/v1alpha1", Resource: "vaultkmsconfigs", Name: "cluster"},
+	}
+}
+
+func vaultPluginConfig(t *testing.T, config *unstructured.Unstructured) *unstructured.Unstructured {
+	t.Helper()
+	obj := config.DeepCopy()
+	if obj.GetName() == "" {
+		obj.SetName("cluster")
+	}
+	return obj
+}
+
+func newKMSDynamicClient(t *testing.T, configs ...*unstructured.Unstructured) *dynamicfake.FakeDynamicClient {
+	t.Helper()
+	if len(configs) == 0 {
+		configs = []*unstructured.Unstructured{vaultPluginConfig(t, wellKnownBaseVaultConfig)}
+	}
+	objects := []runtime.Object{}
+	for _, config := range configs {
+		obj := config.DeepCopy()
+		if obj.GetName() == "" {
+			obj.SetName("cluster")
+		}
+		objects = append(objects, obj)
+	}
+	return dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), objects...)
 }

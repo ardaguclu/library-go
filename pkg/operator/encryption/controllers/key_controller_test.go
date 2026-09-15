@@ -15,6 +15,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/diff"
@@ -48,7 +49,7 @@ func TestKeyController(t *testing.T) {
 	apiServerWithAESGCM.Spec.Encryption = configv1.APIServerEncryption{Type: "aesgcm"}
 
 	apiServerWithKMS := simpleAPIServer.DeepCopy()
-	apiServerWithKMS.Spec.Encryption = configv1.APIServerEncryption{Type: "KMS", KMS: encryptiontesting.DefaultKMSPluginConfig}
+	apiServerWithKMS.Spec.Encryption = configv1.APIServerEncryption{Type: "KMS", KMS: kmsPluginConfigReference()}
 
 	kmsCreateKeyStatusProvider := newPreflightSucceededProvider(t, encryptiontesting.DefaultKMSPluginConfig,
 		encryptiontesting.CreateVaultAppRoleSecret("vault-approle-secret", "test-role-id", "test-secret-id"),
@@ -66,6 +67,7 @@ func TestKeyController(t *testing.T) {
 		name                     string
 		initialObjects           []runtime.Object
 		apiServerObjects         []runtime.Object
+		pluginConfig             *unstructured.Unstructured
 		encryptionSecretSelector metav1.ListOptions
 		targetNamespace          string
 		targetGRs                []schema.GroupResource
@@ -393,7 +395,9 @@ func TestKeyController(t *testing.T) {
 
 						// Verify KMS plugin config content
 						kmsPluginConfigData := actualSecret.Data["encryption.apiserver.operator.openshift.io-kms-plugin-config"]
-						expectedPluginConfig, err := encoding.EncodeKMSPluginConfig(encryptiontesting.DefaultKMSPluginConfig)
+						expectedPlugin := encryptiontesting.DefaultKMSPluginConfig.DeepCopy()
+						expectedPlugin.SetName("cluster")
+						expectedPluginConfig, err := encoding.EncodeKMSPluginConfig(expectedPlugin)
 						if err != nil {
 							ts.Fatalf("failed to encode KMS config: %v", err)
 						}
@@ -487,7 +491,9 @@ func TestKeyController(t *testing.T) {
 
 						// Verify KMS plugin config content
 						kmsPluginConfigData := actualSecret.Data["encryption.apiserver.operator.openshift.io-kms-plugin-config"]
-						expectedPluginConfig, err := encoding.EncodeKMSPluginConfig(encryptiontesting.DefaultKMSPluginConfig)
+						expectedPlugin := encryptiontesting.DefaultKMSPluginConfig.DeepCopy()
+						expectedPlugin.SetName("cluster")
+						expectedPluginConfig, err := encoding.EncodeKMSPluginConfig(expectedPlugin)
 						if err != nil {
 							ts.Fatalf("failed to encode KMS config: %v", err)
 						}
@@ -584,7 +590,9 @@ func TestKeyController(t *testing.T) {
 
 						// Verify KMS plugin config content
 						kmsPluginConfigData := actualSecret.Data["encryption.apiserver.operator.openshift.io-kms-plugin-config"]
-						expectedPluginConfig, err := encoding.EncodeKMSPluginConfig(encryptiontesting.DefaultKMSPluginConfig)
+						expectedPlugin := encryptiontesting.DefaultKMSPluginConfig.DeepCopy()
+						expectedPlugin.SetName("cluster")
+						expectedPluginConfig, err := encoding.EncodeKMSPluginConfig(expectedPlugin)
 						if err != nil {
 							ts.Fatalf("failed to encode KMS config: %v", err)
 						}
@@ -841,13 +849,12 @@ func TestKeyController(t *testing.T) {
 				encryptiontesting.CreateDummyKubeAPIPod("kube-apiserver-1", "kms", "node-1"),
 				encryptiontesting.CreateMigratedEncryptionKeySecretWithKMSPluginConfig("kms", []schema.GroupResource{{Group: "", Resource: "secrets"}}, 5, time.Now()),
 			},
-			apiServerObjects: []runtime.Object{func() runtime.Object {
-				s := simpleAPIServer.DeepCopy()
+			apiServerObjects: []runtime.Object{apiServerWithKMS},
+			pluginConfig: func() *unstructured.Unstructured {
 				changedConfig := encryptiontesting.DefaultKMSPluginConfig.DeepCopy()
-				changedConfig.Vault.KMSPluginImage = "registry.example.com/kms-plugin@sha256:0000000000000000000000000000000000000000000000000000000000000000"
-				s.Spec.Encryption = configv1.APIServerEncryption{Type: "KMS", KMS: *changedConfig}
-				return s
-			}()},
+				require.NoError(t, unstructured.SetNestedField(changedConfig.Object, "registry.example.com/kms-plugin@sha256:0000000000000000000000000000000000000000000000000000000000000000", "status", "kmsPluginImage"))
+				return changedConfig
+			}(),
 			targetNamespace: "kms",
 			expectedActions: []string{"list:pods:kms", "get:secrets:kms", "list:secrets:openshift-config-managed"},
 		},
@@ -861,13 +868,12 @@ func TestKeyController(t *testing.T) {
 				encryptiontesting.CreateDummyKubeAPIPod("kube-apiserver-1", "kms", "node-1"),
 				encryptiontesting.CreateMigratedEncryptionKeySecretWithKMSPluginConfig("kms", []schema.GroupResource{{Group: "", Resource: "secrets"}}, 5, time.Now()),
 			},
-			apiServerObjects: []runtime.Object{func() runtime.Object {
-				s := simpleAPIServer.DeepCopy()
+			apiServerObjects: []runtime.Object{apiServerWithKMS},
+			pluginConfig: func() *unstructured.Unstructured {
 				changedConfig := encryptiontesting.DefaultKMSPluginConfig.DeepCopy()
-				changedConfig.Vault.Authentication.AppRole.Secret.Name = "new-approle-secret"
-				s.Spec.Encryption = configv1.APIServerEncryption{Type: "KMS", KMS: *changedConfig}
-				return s
-			}()},
+				require.NoError(t, unstructured.SetNestedField(changedConfig.Object, "new-approle-secret", "spec", "authentication", "appRole", "secret", "name"))
+				return changedConfig
+			}(),
 			targetNamespace: "kms",
 			expectedActions: []string{"list:pods:kms", "get:secrets:kms", "list:secrets:openshift-config-managed"},
 		},
@@ -881,15 +887,12 @@ func TestKeyController(t *testing.T) {
 				encryptiontesting.CreateDummyKubeAPIPod("kube-apiserver-1", "kms", "node-1"),
 				encryptiontesting.CreateMigratedEncryptionKeySecretWithKMSPluginConfig("kms", []schema.GroupResource{{Group: "", Resource: "secrets"}}, 5, time.Now()),
 			},
-			apiServerObjects: []runtime.Object{func() runtime.Object {
-				s := simpleAPIServer.DeepCopy()
+			apiServerObjects: []runtime.Object{apiServerWithKMS},
+			pluginConfig: func() *unstructured.Unstructured {
 				changedConfig := encryptiontesting.DefaultKMSPluginConfig.DeepCopy()
-				changedConfig.Vault.TLS = configv1.VaultTLSConfig{
-					CABundle: configv1.VaultConfigMapReference{Name: "my-ca"},
-				}
-				s.Spec.Encryption = configv1.APIServerEncryption{Type: "KMS", KMS: *changedConfig}
-				return s
-			}()},
+				require.NoError(t, unstructured.SetNestedField(changedConfig.Object, "my-ca", "spec", "tls", "caBundle", "name"))
+				return changedConfig
+			}(),
 			targetNamespace: "kms",
 			expectedActions: []string{"list:pods:kms", "get:secrets:kms", "list:secrets:openshift-config-managed"},
 		},
@@ -933,6 +936,11 @@ func TestKeyController(t *testing.T) {
 			fakeSecretClient := fakeKubeClient.CoreV1()
 			fakeConfigMapClient := fakeKubeClient.CoreV1()
 			fakePodClient := fakeKubeClient.CoreV1()
+			pluginConfig := scenario.pluginConfig
+			if pluginConfig == nil {
+				pluginConfig = encryptiontesting.DefaultKMSPluginConfig
+			}
+			fakeDynamicClient := newKMSDynamicClient(t, pluginConfig)
 			fakeConfigClient := configv1clientfake.NewSimpleClientset(scenario.apiServerObjects...)
 			fakeApiServerClient := fakeConfigClient.ConfigV1().APIServers()
 			fakeApiServerInformer := configv1informers.NewSharedInformerFactory(fakeConfigClient, time.Minute).Config().V1().APIServers()
@@ -943,7 +951,7 @@ func TestKeyController(t *testing.T) {
 			}
 			provider := newTestProvider(scenario.targetGRs)
 
-			target := NewKeyController(scenario.targetNamespace, nil, provider, deployer, alwaysFulfilledPreconditions, fakeOperatorClient, fakeApiServerClient, fakeApiServerInformer, kubeInformers, fakeSecretClient, fakeConfigMapClient, scenario.encryptionSecretSelector, eventRecorder, scenario.encryptionStatusProvider)
+			target := NewKeyController(scenario.targetNamespace, nil, provider, deployer, alwaysFulfilledPreconditions, fakeOperatorClient, fakeApiServerClient, fakeApiServerInformer, kubeInformers, fakeSecretClient, fakeConfigMapClient, fakeDynamicClient, scenario.encryptionSecretSelector, eventRecorder, scenario.encryptionStatusProvider)
 
 			// act
 			err = target.Sync(context.TODO(), factory.NewSyncContext("test", eventRecorder))
@@ -976,19 +984,25 @@ func TestKMSMigrationTriggeredFields(t *testing.T) {
 
 	scenarios := []struct {
 		name   string
-		mutate func(cfg *configv1.KMSPluginConfig)
+		mutate func(cfg *unstructured.Unstructured)
 	}{
 		{
-			name:   "VaultAddress",
-			mutate: func(cfg *configv1.KMSPluginConfig) { cfg.Vault.VaultAddress = "https://vault-new.example.com" },
+			name: "VaultAddress",
+			mutate: func(cfg *unstructured.Unstructured) {
+				require.NoError(t, unstructured.SetNestedField(cfg.Object, "https://vault-new.example.com", "spec", "vaultAddress"))
+			},
 		},
 		{
-			name:   "VaultNamespace",
-			mutate: func(cfg *configv1.KMSPluginConfig) { cfg.Vault.VaultNamespace = "new-namespace" },
+			name: "VaultNamespace",
+			mutate: func(cfg *unstructured.Unstructured) {
+				require.NoError(t, unstructured.SetNestedField(cfg.Object, "new-namespace", "spec", "vaultNamespace"))
+			},
 		},
 		{
-			name:   "VaultKeyPath",
-			mutate: func(cfg *configv1.KMSPluginConfig) { cfg.Vault.VaultKeyPath = "transit/keys/new-key" },
+			name: "VaultKeyPath",
+			mutate: func(cfg *unstructured.Unstructured) {
+				require.NoError(t, unstructured.SetNestedField(cfg.Object, "transit/keys/new-key", "spec", "vaultKeyPath"))
+			},
 		},
 	}
 
@@ -998,7 +1012,7 @@ func TestKMSMigrationTriggeredFields(t *testing.T) {
 			scenario.mutate(changedConfig)
 
 			apiServerWithChangedKMS := simpleAPIServer.DeepCopy()
-			apiServerWithChangedKMS.Spec.Encryption = configv1.APIServerEncryption{Type: "KMS", KMS: *changedConfig}
+			apiServerWithChangedKMS.Spec.Encryption = configv1.APIServerEncryption{Type: "KMS", KMS: kmsPluginConfigReference()}
 
 			fakeOperatorClient := v1helpers.NewFakeStaticPodOperatorClient(
 				&operatorv1.StaticPodOperatorSpec{
@@ -1036,9 +1050,9 @@ func TestKMSMigrationTriggeredFields(t *testing.T) {
 			require.NoError(t, err)
 
 			provider := newTestProvider([]schema.GroupResource{{Group: "", Resource: "secrets"}})
-			sp := newPreflightSucceededProvider(t, *changedConfig, initialObjects...)
+			sp := newPreflightSucceededProvider(t, changedConfig, initialObjects...)
 
-			target := NewKeyController("kms", nil, provider, deployer, alwaysFulfilledPreconditions, fakeOperatorClient, fakeApiServerClient, fakeApiServerInformer, kubeInformers, fakeSecretClient, fakeConfigMapClient, metav1.ListOptions{}, eventRecorder, sp)
+			target := NewKeyController("kms", nil, provider, deployer, alwaysFulfilledPreconditions, fakeOperatorClient, fakeApiServerClient, fakeApiServerInformer, kubeInformers, fakeSecretClient, fakeConfigMapClient, newKMSDynamicClient(t, changedConfig), metav1.ListOptions{}, eventRecorder, sp)
 
 			err = target.Sync(context.TODO(), factory.NewSyncContext("test", eventRecorder))
 			require.NoError(t, err)
@@ -1085,10 +1099,10 @@ func preflightSucceededForHash(configHash string) *fakeKMSStatusProvider {
 // newPreflightSucceededProvider builds a fakeKMSStatusProvider pre-seeded with a
 // Succeeded preflight result for the given KMS plugin config and referenced objects.
 // It uses a scratch client so the reads do not pollute any test's action log.
-func newPreflightSucceededProvider(t *testing.T, pluginConfig configv1.KMSPluginConfig, objects ...runtime.Object) *fakeKMSStatusProvider {
+func newPreflightSucceededProvider(t *testing.T, pluginConfig *unstructured.Unstructured, objects ...runtime.Object) *fakeKMSStatusProvider {
 	t.Helper()
 	scratch := fake.NewSimpleClientset(objects...)
-	providerCfg, err := newKMSProviderConfig(pluginConfig)
+	providerCfg, err := newKMSProviderConfig(configv1.VaultKMSProvider, pluginConfig)
 	require.NoError(t, err)
 	hasher, err := newKMSConfigHasher(providerCfg, newCoreClientKMSConfigHasherResourceProvider(scratch.CoreV1(), scratch.CoreV1()), openshiftConfigNS)
 	require.NoError(t, err)
@@ -1117,62 +1131,73 @@ func (f *fakeKMSStatusProvider) UpdateKMSEncryptionStatus(_ context.Context, mut
 func TestReferencedSecretName(t *testing.T) {
 	scenarios := []struct {
 		name             string
-		plugin           configv1.KMSPluginConfig
+		providerType     configv1.KMSProviderType
+		plugin           *unstructured.Unstructured
 		expectedName     string
 		expectedDataKeys []string
 		expectedError    bool
 	}{
 		{
-			name: "Vault with AppRole authentication returns secret name and keys",
-			plugin: configv1.KMSPluginConfig{
-				Type: configv1.VaultKMSProvider,
-				Vault: configv1.VaultKMSPluginConfig{
-					Authentication: configv1.VaultAuthentication{
-						Type: configv1.VaultAuthenticationTypeAppRole,
-						AppRole: configv1.VaultAppRoleAuthentication{
-							Secret: configv1.VaultSecretReference{Name: "my-approle-secret"},
+			name:         "Vault with AppRole authentication returns secret name and keys",
+			providerType: configv1.VaultKMSProvider,
+			plugin: vaultPluginConfig(t, &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "kms.openshift.io/v1alpha1",
+				"kind":       "VaultKMSConfig",
+				"spec": map[string]interface{}{
+					"authentication": map[string]interface{}{
+						"type": "AppRole",
+						"appRole": map[string]interface{}{
+							"secret": map[string]interface{}{
+								"name": "my-approle-secret",
+							},
 						},
 					},
 				},
-			},
+				"status": map[string]interface{}{},
+			}}),
 			expectedName:     "my-approle-secret",
 			expectedDataKeys: []string{"role-id", "secret-id"},
 		},
 		{
-			name: "Vault with unknown authentication type returns error",
-			plugin: configv1.KMSPluginConfig{
-				Type: configv1.VaultKMSProvider,
-				Vault: configv1.VaultKMSPluginConfig{
-					Authentication: configv1.VaultAuthentication{
-						Type: "UnknownAuth",
+			name:         "Vault with unknown authentication type returns error",
+			providerType: configv1.VaultKMSProvider,
+			plugin: vaultPluginConfig(t, &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "kms.openshift.io/v1alpha1",
+				"kind":       "VaultKMSConfig",
+				"spec": map[string]interface{}{
+					"authentication": map[string]interface{}{
+						"type": "UnknownAuth",
 					},
 				},
-			},
+				"status": map[string]interface{}{},
+			}}),
 			expectedError: true,
 		},
 		{
-			name: "Vault with empty authentication type returns error",
-			plugin: configv1.KMSPluginConfig{
-				Type:  configv1.VaultKMSProvider,
-				Vault: configv1.VaultKMSPluginConfig{},
-			},
+			name:         "Vault with empty authentication type returns error",
+			providerType: configv1.VaultKMSProvider,
+			plugin: vaultPluginConfig(t, &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "kms.openshift.io/v1alpha1",
+				"kind":       "VaultKMSConfig",
+				"spec":       map[string]interface{}{},
+				"status":     map[string]interface{}{},
+			}}),
 			expectedError: true,
 		},
 		{
 			name:          "unknown KMS provider returns error",
-			plugin:        configv1.KMSPluginConfig{Type: "UnknownProvider"},
+			providerType:  "UnknownProvider",
 			expectedError: true,
 		},
 		{
 			name:          "empty plugin config returns error",
-			plugin:        configv1.KMSPluginConfig{},
 			expectedError: true,
 		},
 	}
 
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
-			providerCfg, factoryErr := newKMSProviderConfig(scenario.plugin)
+			providerCfg, factoryErr := newKMSProviderConfig(scenario.providerType, scenario.plugin)
 			if factoryErr != nil {
 				if scenario.expectedError {
 					return
@@ -1207,48 +1232,56 @@ func TestReferencedSecretName(t *testing.T) {
 func TestReferencedConfigMapName(t *testing.T) {
 	scenarios := []struct {
 		name             string
-		plugin           configv1.KMSPluginConfig
+		providerType     configv1.KMSProviderType
+		plugin           *unstructured.Unstructured
 		expectedName     string
 		expectedDataKeys []string
 		expectedError    bool
 	}{
 		{
-			name: "Vault with TLS CA bundle returns configmap name and keys",
-			plugin: configv1.KMSPluginConfig{
-				Type: configv1.VaultKMSProvider,
-				Vault: configv1.VaultKMSPluginConfig{
-					TLS: configv1.VaultTLSConfig{
-						CABundle: configv1.VaultConfigMapReference{Name: "vault-ca-bundle"},
+			name:         "Vault with TLS CA bundle returns configmap name and keys",
+			providerType: configv1.VaultKMSProvider,
+			plugin: vaultPluginConfig(t, &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "kms.openshift.io/v1alpha1",
+				"kind":       "VaultKMSConfig",
+				"spec": map[string]interface{}{
+					"tls": map[string]interface{}{
+						"caBundle": map[string]interface{}{
+							"name": "vault-ca-bundle",
+						},
 					},
 				},
-			},
+				"status": map[string]interface{}{},
+			}}),
 			expectedName:     "vault-ca-bundle",
 			expectedDataKeys: []string{"ca-bundle.crt"},
 		},
 		{
-			name: "Vault without TLS CA bundle returns empty",
-			plugin: configv1.KMSPluginConfig{
-				Type:  configv1.VaultKMSProvider,
-				Vault: configv1.VaultKMSPluginConfig{},
-			},
+			name:         "Vault without TLS CA bundle returns empty",
+			providerType: configv1.VaultKMSProvider,
+			plugin: vaultPluginConfig(t, &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "kms.openshift.io/v1alpha1",
+				"kind":       "VaultKMSConfig",
+				"spec":       map[string]interface{}{},
+				"status":     map[string]interface{}{},
+			}}),
 			expectedName:     "",
 			expectedDataKeys: nil,
 		},
 		{
 			name:          "unknown KMS provider returns error",
-			plugin:        configv1.KMSPluginConfig{Type: "UnknownProvider"},
+			providerType:  "UnknownProvider",
 			expectedError: true,
 		},
 		{
 			name:          "empty plugin config returns error",
-			plugin:        configv1.KMSPluginConfig{},
 			expectedError: true,
 		},
 	}
 
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
-			providerCfg, factoryErr := newKMSProviderConfig(scenario.plugin)
+			providerCfg, factoryErr := newKMSProviderConfig(scenario.providerType, scenario.plugin)
 			if factoryErr != nil {
 				if scenario.expectedError {
 					return
@@ -1357,24 +1390,8 @@ func TestModeAndExternalReasonFromAPIServer(t *testing.T) {
 			apiServerObjects: []runtime.Object{&configv1.APIServer{ObjectMeta: metav1.ObjectMeta{Name: "cluster"}}},
 		},
 		{
-			name: "kms encryption mode",
-			apiServerObjects: []runtime.Object{&configv1.APIServer{ObjectMeta: metav1.ObjectMeta{Name: "cluster"}, Spec: configv1.APIServerSpec{Encryption: configv1.APIServerEncryption{Type: "KMS", KMS: configv1.KMSPluginConfig{
-				Type: configv1.VaultKMSProvider,
-				Vault: configv1.VaultKMSPluginConfig{
-					KMSPluginImage: "registry.example.com/kms-plugin@sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
-					VaultAddress:   "https://vault.example.com",
-					Authentication: configv1.VaultAuthentication{
-						Type: configv1.VaultAuthenticationTypeAppRole,
-						AppRole: configv1.VaultAppRoleAuthentication{
-							Secret: configv1.VaultSecretReference{Name: "vault-approle-secret"},
-						},
-					},
-					TLS: configv1.VaultTLSConfig{
-						CABundle: configv1.VaultConfigMapReference{Name: "vault-ca-bundle"},
-					},
-					VaultKeyPath: "transit/keys/test-transit-key",
-				},
-			}}}}},
+			name:             "kms encryption mode",
+			apiServerObjects: []runtime.Object{&configv1.APIServer{ObjectMeta: metav1.ObjectMeta{Name: "cluster"}, Spec: configv1.APIServerSpec{Encryption: configv1.APIServerEncryption{Type: "KMS", KMS: kmsPluginConfigReference()}}}},
 		},
 	}
 
@@ -1409,26 +1426,29 @@ func TestModeAndExternalReasonFromAPIServer(t *testing.T) {
 }
 
 func TestSameProviderInstance(t *testing.T) {
-	baseConfig := &configv1.KMSPluginConfig{
-		Type: configv1.VaultKMSProvider,
-		Vault: configv1.VaultKMSPluginConfig{
-			KMSPluginImage: "registry.example.com/kms-plugin@sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
-			VaultAddress:   "https://vault.example.com",
-			VaultNamespace: "ns1",
-			VaultKeyPath:   "transit/keys/my-key",
-			Authentication: configv1.VaultAuthentication{
-				Type: configv1.VaultAuthenticationTypeAppRole,
-				AppRole: configv1.VaultAppRoleAuthentication{
-					Secret: configv1.VaultSecretReference{Name: "vault-approle-secret"},
+	baseConfig := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "kms.openshift.io/v1alpha1",
+		"kind":       "VaultKMSConfig",
+		"spec": map[string]interface{}{
+			"vaultAddress":   "https://vault.example.com",
+			"vaultNamespace": "ns1",
+			"vaultKeyPath":   "transit/keys/my-key",
+			"authentication": map[string]interface{}{
+				"type": "AppRole",
+				"appRole": map[string]interface{}{
+					"secret": map[string]interface{}{
+						"name": "vault-approle-secret",
+					},
 				},
 			},
 		},
-	}
+		"status": map[string]interface{}{"kmsPluginImage": "registry.example.com/kms-plugin@sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"},
+	}}
 
 	tests := []struct {
 		name     string
-		latest   *configv1.KMSPluginConfig
-		current  *configv1.KMSPluginConfig
+		latest   *unstructured.Unstructured
+		current  *unstructured.Unstructured
 		expected bool
 	}{
 		{
@@ -1440,9 +1460,9 @@ func TestSameProviderInstance(t *testing.T) {
 		{
 			name:   "different VaultAddress",
 			latest: baseConfig.DeepCopy(),
-			current: func() *configv1.KMSPluginConfig {
+			current: func() *unstructured.Unstructured {
 				c := baseConfig.DeepCopy()
-				c.Vault.VaultAddress = "https://vault-new.example.com"
+				require.NoError(t, unstructured.SetNestedField(c.Object, "https://vault-new.example.com", "spec", "vaultAddress"))
 				return c
 			}(),
 			expected: false,
@@ -1450,9 +1470,9 @@ func TestSameProviderInstance(t *testing.T) {
 		{
 			name:   "different VaultNamespace",
 			latest: baseConfig.DeepCopy(),
-			current: func() *configv1.KMSPluginConfig {
+			current: func() *unstructured.Unstructured {
 				c := baseConfig.DeepCopy()
-				c.Vault.VaultNamespace = "ns2"
+				require.NoError(t, unstructured.SetNestedField(c.Object, "ns2", "spec", "vaultNamespace"))
 				return c
 			}(),
 			expected: false,
@@ -1460,9 +1480,9 @@ func TestSameProviderInstance(t *testing.T) {
 		{
 			name:   "different VaultKeyPath",
 			latest: baseConfig.DeepCopy(),
-			current: func() *configv1.KMSPluginConfig {
+			current: func() *unstructured.Unstructured {
 				c := baseConfig.DeepCopy()
-				c.Vault.VaultKeyPath = "transit/keys/new-key"
+				require.NoError(t, unstructured.SetNestedField(c.Object, "transit/keys/new-key", "spec", "vaultKeyPath"))
 				return c
 			}(),
 			expected: false,
@@ -1470,9 +1490,9 @@ func TestSameProviderInstance(t *testing.T) {
 		{
 			name:   "different KMSPluginImage only",
 			latest: baseConfig.DeepCopy(),
-			current: func() *configv1.KMSPluginConfig {
+			current: func() *unstructured.Unstructured {
 				c := baseConfig.DeepCopy()
-				c.Vault.KMSPluginImage = "registry.example.com/kms-plugin@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+				require.NoError(t, unstructured.SetNestedField(c.Object, "registry.example.com/kms-plugin@sha256:0000000000000000000000000000000000000000000000000000000000000000", "status", "kmsPluginImage"))
 				return c
 			}(),
 			expected: true,
@@ -1480,11 +1500,9 @@ func TestSameProviderInstance(t *testing.T) {
 		{
 			name:   "different TLS only",
 			latest: baseConfig.DeepCopy(),
-			current: func() *configv1.KMSPluginConfig {
+			current: func() *unstructured.Unstructured {
 				c := baseConfig.DeepCopy()
-				c.Vault.TLS = configv1.VaultTLSConfig{
-					CABundle: configv1.VaultConfigMapReference{Name: "my-ca"},
-				}
+				require.NoError(t, unstructured.SetNestedField(c.Object, "my-ca", "spec", "tls", "caBundle", "name"))
 				return c
 			}(),
 			expected: true,
@@ -1492,9 +1510,9 @@ func TestSameProviderInstance(t *testing.T) {
 		{
 			name:   "different Authentication only",
 			latest: baseConfig.DeepCopy(),
-			current: func() *configv1.KMSPluginConfig {
+			current: func() *unstructured.Unstructured {
 				c := baseConfig.DeepCopy()
-				c.Vault.Authentication.AppRole.Secret.Name = "new-secret"
+				require.NoError(t, unstructured.SetNestedField(c.Object, "new-secret", "spec", "authentication", "appRole", "secret", "name"))
 				return c
 			}(),
 			expected: true,
@@ -1503,9 +1521,9 @@ func TestSameProviderInstance(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			providerCfg, err := newKMSProviderConfig(*tt.current)
+			providerCfg, err := newKMSProviderConfig(configv1.VaultKMSProvider, tt.current)
 			require.NoError(t, err)
-			got, err := providerCfg.sameProviderInstance(*tt.latest)
+			got, err := providerCfg.sameProviderInstance(tt.latest)
 			require.NoError(t, err)
 			require.Equal(t, tt.expected, got)
 		})

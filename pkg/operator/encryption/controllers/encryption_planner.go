@@ -8,7 +8,9 @@ import (
 	configv1client "github.com/openshift/client-go/config/clientset/versioned/typed/config/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 
 	"github.com/openshift/library-go/pkg/operator/encryption/encryptiondata"
@@ -31,10 +33,11 @@ type EncryptionPlanner struct {
 	configMapClient          corev1client.ConfigMapsGetter
 	apiServerClient          configv1client.APIServerInterface
 	operatorClient           operatorv1helpers.OperatorClient
+	dynamicClient            dynamic.Interface
 	encryptionSecretSelector metav1.ListOptions
 }
 
-func NewEncryptionPlanner(instanceName string, unsupportedConfigPrefix []string, deployer statemachine.Deployer, secretClient corev1client.SecretsGetter, configMapClient corev1client.ConfigMapsGetter, apiServerClient configv1client.APIServerInterface, operatorClient operatorv1helpers.OperatorClient, encryptionSecretSelector metav1.ListOptions) *EncryptionPlanner {
+func NewEncryptionPlanner(instanceName string, unsupportedConfigPrefix []string, deployer statemachine.Deployer, secretClient corev1client.SecretsGetter, configMapClient corev1client.ConfigMapsGetter, apiServerClient configv1client.APIServerInterface, operatorClient operatorv1helpers.OperatorClient, dynamicClient dynamic.Interface, encryptionSecretSelector metav1.ListOptions) *EncryptionPlanner {
 	return &EncryptionPlanner{
 		instanceName:             instanceName,
 		unsupportedConfigPrefix:  unsupportedConfigPrefix,
@@ -43,6 +46,7 @@ func NewEncryptionPlanner(instanceName string, unsupportedConfigPrefix []string,
 		configMapClient:          configMapClient,
 		apiServerClient:          apiServerClient,
 		operatorClient:           operatorClient,
+		dynamicClient:            dynamicClient,
 		encryptionSecretSelector: encryptionSecretSelector,
 	}
 }
@@ -64,6 +68,7 @@ type KeyPlanningSnapshot struct {
 	CurrentMode        state.Mode
 	ExternalReason     string
 	APIEncryption      configv1.APIServerEncryption
+	PluginConfig       *unstructured.Unstructured
 	desiredProviderCfg kmsProviderConfig
 }
 
@@ -92,6 +97,9 @@ type LoadOptions struct {
 	// KMSPluginConfig, when set, skips the APIServer GET in Load.
 	// Callers must only set this when encryption type is already known to be KMS.
 	KMSPluginConfig *configv1.KMSPluginConfig
+	// PluginConfig is the fetched snapshot used to compute the preflight hash.
+	// Callers supplying it must also supply KMSPluginConfig.
+	PluginConfig *unstructured.Unstructured
 }
 
 // EncryptionPlanResult is returned by ComputeConfig.
@@ -166,7 +174,15 @@ func (p *EncryptionPlanner) Load(ctx context.Context, encryptedGRs []schema.Grou
 	}
 
 	if currentMode == state.KMS {
-		desiredProviderCfg, err := newKMSProviderConfig(apiEncryption.KMS)
+		resolvedConfig := opts.PluginConfig
+		if resolvedConfig == nil {
+			resolvedConfig, err = ResolveKMSConfig(ctx, p.dynamicClient, apiEncryption.KMS)
+			if err != nil {
+				return nil, err
+			}
+		}
+		snap.PluginConfig = resolvedConfig
+		desiredProviderCfg, err := newKMSProviderConfig(apiEncryption.KMS.Type, resolvedConfig)
 		if err != nil {
 			return nil, err
 		}
@@ -219,7 +235,7 @@ func (p *EncryptionPlanner) MaterializeKey(ctx context.Context, snap *KeyPlannin
 		return nil, fmt.Errorf("configMapClient is required for MaterializeKey")
 	}
 
-	ks, _, _, err := buildEncryptionKeyState(ctx, plan.KeyID, snap.CurrentMode, snap.APIEncryption, snap.desiredProviderCfg, p.secretClient, p.configMapClient, plan.InternalReason, snap.ExternalReason)
+	ks, _, _, err := buildEncryptionKeyState(ctx, plan.KeyID, snap.CurrentMode, snap.PluginConfig, snap.desiredProviderCfg, p.secretClient, p.configMapClient, plan.InternalReason, snap.ExternalReason)
 	if err != nil {
 		return nil, plannedKeyBuildError{err: err}
 	}
